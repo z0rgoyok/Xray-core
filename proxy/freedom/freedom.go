@@ -19,6 +19,7 @@ import (
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/common/utils"
+	"github.com/xtls/xray-core/common/wexquota"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/policy"
 	"github.com/xtls/xray-core/features/stats"
@@ -77,6 +78,7 @@ func isValidAddress(addr *net.IPOrDomain) bool {
 
 // Process implements proxy.Outbound.
 func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer internet.Dialer) error {
+	quotaSession := wexquota.FromContext(ctx)
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
 	if !ob.Target.IsValid() {
@@ -160,7 +162,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 	var newCtx context.Context
 	var newCancel context.CancelFunc
-	if session.TimeoutOnlyFromContext(ctx) {
+	if session.TimeoutOnlyFromContext(ctx) && quotaSession == nil {
 		newCtx, newCancel = context.WithCancel(context.Background())
 	}
 
@@ -202,6 +204,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 			}
 		}
 
+		if quotaSession != nil {
+			writer = quotaSession.WrapWriter(writer, destination.Network == net.Network_UDP, conn)
+		}
 		if err := buf.Copy(input, writer, buf.UpdateActivity(timer)); err != nil {
 			return errors.New("failed to process request").Base(err)
 		}
@@ -211,7 +216,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 	responseDone := func() error {
 		defer timer.SetTimeout(plcy.Timeouts.UplinkOnly)
-		if destination.Network == net.Network_TCP && useSplice && proxy.IsRAWTransportWithoutSecurity(conn) { // it would be tls conn in special use case of MITM, we need to let link handle traffic
+		if quotaSession == nil && destination.Network == net.Network_TCP && useSplice && proxy.IsRAWTransportWithoutSecurity(conn) { // it would be tls conn in special use case of MITM, we need to let link handle traffic
 			var writeConn net.Conn
 			var inTimer *signal.ActivityTimer
 			if inbound := session.InboundFromContext(ctx); inbound != nil && inbound.Conn != nil {

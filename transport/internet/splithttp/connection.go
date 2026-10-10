@@ -59,6 +59,8 @@ func (c *splitConn) SetReadDeadline(t time.Time) error {
 }
 
 func (c *splitConn) SetWriteDeadline(t time.Time) error {
-	// TODO cannot do anything useful
+	if writer, ok := c.writer.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		return writer.SetWriteDeadline(t)
+	}
 	return nil
 }

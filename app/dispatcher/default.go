@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xtls/xray-core/app/proxyman"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/common/wexquota"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features/dns"
 	"github.com/xtls/xray-core/features/outbound"
@@ -499,6 +501,23 @@ func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.
 		return
 	}
 
+	if wexquota.FromContext(ctx) != nil {
+		if sender := handler.SenderSettings(); sender != nil {
+			config, err := sender.GetInstance()
+			settings, ok := config.(*proxyman.SenderConfig)
+			if err != nil || !ok || (settings.MultiplexSettings != nil && settings.MultiplexSettings.Enabled) {
+				common.Close(link.Writer)
+				common.Interrupt(link.Reader)
+				return
+			}
+		}
+		settings := handler.ProxySettings()
+		if settings == nil || (settings.Type != "xray.proxy.freedom.Config" && settings.Type != "xray.proxy.blackhole.Config") {
+			common.Close(link.Writer)
+			common.Interrupt(link.Reader)
+			return
+		}
+	}
 	ob.Tag = handler.Tag()
 	if accessMessage := log.AccessMessageFromContext(ctx); accessMessage != nil {
 		if tag := handler.Tag(); tag != "" {
