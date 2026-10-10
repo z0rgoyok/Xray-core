@@ -410,6 +410,9 @@ func (h *requestHandler) ServeHTTP(writer http.ResponseWriter, request *http.Req
 
 type httpServerConn struct {
 	sync.Mutex
+	deadlineMu sync.Mutex
+	closeOnce  sync.Once
+	closing    bool
 	*done.Instance
 	io.Reader // no need to Close request.Body
 	http.ResponseWriter
@@ -418,7 +421,10 @@ type httpServerConn struct {
 func (c *httpServerConn) Write(b []byte) (int, error) {
 	c.Lock()
 	defer c.Unlock()
-	if c.Done() {
+	c.deadlineMu.Lock()
+	closed := c.closing || c.Done()
+	c.deadlineMu.Unlock()
+	if closed {
 		return 0, io.ErrClosedPipe
 	}
 	n, err := c.ResponseWriter.Write(b)
@@ -431,12 +437,24 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 // Deadline cancellation is independent of Write's mutex: a blocked downstream
 // must not prevent revoking this stream or stall its control-plane acknowledgement.
 func (c *httpServerConn) Close() error {
-	http.NewResponseController(c.ResponseWriter).SetWriteDeadline(time.Now())
-	c.Lock()
-	defer c.Unlock()
-	return c.Instance.Close()
+	var err error
+	c.closeOnce.Do(func() {
+		c.deadlineMu.Lock()
+		c.closing = true
+		http.NewResponseController(c.ResponseWriter).SetWriteDeadline(time.Now())
+		c.deadlineMu.Unlock()
+		c.Lock()
+		defer c.Unlock()
+		err = c.Instance.Close()
+	})
+	return err
 }
 func (c *httpServerConn) SetWriteDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	if c.closing || c.Done() {
+		return io.ErrClosedPipe
+	}
 	return http.NewResponseController(c.ResponseWriter).SetWriteDeadline(t)
 }
 
