@@ -10,8 +10,14 @@ import (
 )
 
 func main() {
-	if len(os.Args) == 3 && os.Args[1] == "wexquota-init" {
-		id, err := wexquota.Initialize(os.Args[2])
+	if (len(os.Args) == 3 || len(os.Args) == 4) && os.Args[1] == "wexquota-init" {
+		var id string
+		var err error
+		if len(os.Args) == 4 {
+			id, err = wexquota.InitializeNamed(os.Args[2], os.Args[3])
+		} else {
+			id, err = wexquota.Initialize(os.Args[2])
+		}
 		if err != nil {
 			os.Stderr.WriteString("quota initialization failed\n")
 			os.Exit(1)

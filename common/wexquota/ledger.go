@@ -108,7 +108,20 @@ func encode(r record) ([]byte, error) {
 	out, e := json.Marshal(envelope{b, hex.EncodeToString(sum[:])})
 	return append(out, '\n'), e
 }
-func Initialize(dir string) (string, error) {
+func Initialize(dir string) (string, error) { return initialize(dir, "") }
+
+// InitializeNamed pins a previously registered, non-secret ledger identity.
+// O_EXCL still refuses replacing any existing journal or consumed quota.
+func InitializeNamed(dir, id string) (string, error) {
+	if len(id) != 32 {
+		return "", ErrDenied
+	}
+	if _, err := hex.DecodeString(id); err != nil {
+		return "", ErrDenied
+	}
+	return initialize(dir, strings.ToLower(id))
+}
+func initialize(dir, namedID string) (string, error) {
 	if !filepath.IsAbs(dir) {
 		return "", ErrDenied
 	}
@@ -129,7 +142,11 @@ func Initialize(dir string) (string, error) {
 	if _, e = rand.Read(id[:]); e != nil {
 		return "", e
 	}
-	s := snapshot{LedgerID: hex.EncodeToString(id[:]), Limits: map[string]int64{}, Grants: []Grant{}, Usage: []Usage{}}
+	ledgerID := namedID
+	if ledgerID == "" {
+		ledgerID = hex.EncodeToString(id[:])
+	}
+	s := snapshot{LedgerID: ledgerID, Limits: map[string]int64{}, Grants: []Grant{}, Usage: []Usage{}}
 	b, e := encode(record{Kind: "snapshot", Snapshot: &s})
 	if e != nil {
 		return "", e

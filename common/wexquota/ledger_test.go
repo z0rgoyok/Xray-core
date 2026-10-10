@@ -356,3 +356,26 @@ func TestTCPRemainingAcrossMultipleBuffers(t *testing.T) {
 		t.Fatal("TCP remaining lost", out.Len(), m.State())
 	}
 }
+
+func TestNamedInitializationPinsIdentityAndNeverReplacesLedger(t *testing.T) {
+	dir := t.TempDir()
+	id := "aabbccddaabbccddaabbccddaabbccdd"
+	got, e := InitializeNamed(dir, id)
+	if e != nil || got != id {
+		t.Fatal(got, e)
+	}
+	m, e := Open(dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if m.State().LedgerID != id {
+		t.Fatal("identity changed")
+	}
+	m.Close()
+	if _, e = InitializeNamed(dir, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); e == nil {
+		t.Fatal("replaced existing ledger")
+	}
+	if _, e = InitializeNamed(t.TempDir(), "not-an-id"); e == nil {
+		t.Fatal("malformed identity accepted")
+	}
+}
