@@ -2,6 +2,7 @@ package splithttp
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"sync"
 	"testing"
@@ -69,5 +70,73 @@ func TestQuotaCloseCancelsStalledResponseWithoutMutex(t *testing.T) {
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("Write remained blocked")
+	}
+}
+
+// The real HTTP/2 writer clears its pooled state when ServeHTTP returns.
+// Any later ResponseController deadline call dereferences that cleared state.
+type returnedHandlerWriter struct {
+	done          bool
+	deadlineCalls int
+}
+
+func (w *returnedHandlerWriter) Header() http.Header         { return http.Header{} }
+func (w *returnedHandlerWriter) WriteHeader(int)             {}
+func (w *returnedHandlerWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (w *returnedHandlerWriter) Flush()                      {}
+func (w *returnedHandlerWriter) SetWriteDeadline(time.Time) error {
+	if w.done {
+		panic("deadline touched ResponseWriter after handler return")
+	}
+	w.deadlineCalls++
+	return nil
+}
+func TestDeadlineResetAndRepeatedCloseAfterHandlerReturn(t *testing.T) {
+	writer := &returnedHandlerWriter{}
+	c := &httpServerConn{Instance: done.New(), ResponseWriter: writer}
+	if e := c.Close(); e != nil {
+		t.Fatal(e)
+	}
+	<-c.Wait()
+	writer.done = true
+	// quotaWriter resets its deadline after a concurrently revoked Write returns.
+	if e := c.SetWriteDeadline(time.Time{}); !errors.Is(e, io.ErrClosedPipe) {
+		t.Fatal("closed stream deadline was not rejected", e)
+	}
+	if e := c.Close(); e != nil {
+		t.Fatal(e)
+	}
+	if writer.deadlineCalls != 1 {
+		t.Fatal("closed writer called again", writer.deadlineCalls)
+	}
+}
+
+func TestDeadlineResetCannotClearCloseInterrupt(t *testing.T) {
+	writer := &stalledResponse{entered: make(chan struct{}), cancel: make(chan struct{}), returned: make(chan struct{}), cleanup: make(chan struct{})}
+	c := &httpServerConn{Instance: done.New(), ResponseWriter: writer}
+	writeDone := make(chan struct{})
+	go func() { c.Write([]byte("pending")); close(writeDone) }()
+	<-writer.entered
+	closeDone := make(chan struct{})
+	go func() { c.Close(); close(closeDone) }()
+	<-writer.cancel
+	if c.Done() {
+		close(writer.cleanup)
+		t.Fatal("Close completed while writer cleanup still active")
+	}
+	if e := c.SetWriteDeadline(time.Time{}); !errors.Is(e, io.ErrClosedPipe) {
+		close(writer.cleanup)
+		t.Fatal("deadline reset cleared a close interrupt", e)
+	}
+	close(writer.cleanup)
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close hung")
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Write hung")
 	}
 }

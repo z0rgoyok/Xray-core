@@ -49,7 +49,6 @@ func (m *Manager) Begin(ctx context.Context, email string, conn net.Conn) (conte
 func (s *Session) Close() {
 	s.once.Do(func() {
 		s.cancel()
-		s.conn.SetWriteDeadline(time.Now())
 		s.conn.Close()
 		s.manager.mu.Lock()
 		delete(s.manager.sessions, s)
