@@ -14,6 +14,7 @@ type stalledResponse struct {
 	entered  chan struct{}
 	cancel   chan struct{}
 	returned chan struct{}
+	cleanup  chan struct{}
 	once     sync.Once
 }
 
@@ -23,6 +24,7 @@ func (s *stalledResponse) Write([]byte) (int, error) {
 	close(s.entered)
 	defer close(s.returned)
 	<-s.cancel
+	<-s.cleanup
 	return 0, errors.New("deadline")
 }
 func (s *stalledResponse) Flush() {}
@@ -33,13 +35,21 @@ func (s *stalledResponse) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 func TestQuotaCloseCancelsStalledResponseWithoutMutex(t *testing.T) {
-	w := &stalledResponse{entered: make(chan struct{}), cancel: make(chan struct{}), returned: make(chan struct{})}
+	w := &stalledResponse{entered: make(chan struct{}), cancel: make(chan struct{}), returned: make(chan struct{}), cleanup: make(chan struct{})}
 	c := &httpServerConn{Instance: done.New(), ResponseWriter: w}
 	finished := make(chan struct{})
 	go func() { c.Write([]byte("pending")); close(finished) }()
 	<-w.entered
 	closed := make(chan struct{})
 	go func() { c.Close(); close(closed) }()
+	<-w.cancel
+	select {
+	case <-c.Wait():
+		close(w.cleanup)
+		t.Fatal("ServeHTTP returned while writer cleanup remained active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(w.cleanup)
 	select {
 	case <-c.Wait():
 		select {
