@@ -4,11 +4,21 @@ import (
 	"flag"
 	"os"
 
+	"github.com/xtls/xray-core/common/wexquota"
 	"github.com/xtls/xray-core/main/commands/base"
 	_ "github.com/xtls/xray-core/main/distro/all"
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "wexquota-init" {
+		id, err := wexquota.Initialize(os.Args[2])
+		if err != nil {
+			os.Stderr.WriteString("quota initialization failed\n")
+			os.Exit(1)
+		}
+		os.Stdout.WriteString(id + "\n")
+		return
+	}
 	os.Args = getArgsV4Compatible()
 
 	base.RootCommand.Long = "Xray is a platform for building proxies."

@@ -423,15 +423,19 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 	}
 	n, err := c.ResponseWriter.Write(b)
 	if err == nil {
-		c.ResponseWriter.(http.Flusher).Flush()
+		err = http.NewResponseController(c.ResponseWriter).Flush()
 	}
 	return n, err
 }
 
+// Deadline cancellation is independent of Write's mutex: a blocked downstream
+// must not prevent revoking this stream or stall its control-plane acknowledgement.
 func (c *httpServerConn) Close() error {
-	c.Lock()
-	defer c.Unlock()
+	http.NewResponseController(c.ResponseWriter).SetWriteDeadline(time.Now())
 	return c.Instance.Close()
+}
+func (c *httpServerConn) SetWriteDeadline(t time.Time) error {
+	return http.NewResponseController(c.ResponseWriter).SetWriteDeadline(t)
 }
 
 type Listener struct {

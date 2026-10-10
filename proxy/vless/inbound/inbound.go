@@ -26,6 +26,7 @@ import (
 	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/common/task"
+	"github.com/xtls/xray-core/common/wexquota"
 	"github.com/xtls/xray-core/core"
 	"github.com/xtls/xray-core/features"
 	"github.com/xtls/xray-core/features/dns"
@@ -174,6 +175,7 @@ func New(ctx context.Context, config *Config, dc dns.Client, validator vless.Val
 		}
 	}
 
+	wexquota.Environment()
 	return handler, nil
 }
 
@@ -537,6 +539,19 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	inbound.User = request.User
 	inbound.VlessRoute = net.PortFromBytes(userSentID[6:8])
 
+	var quotaSession *wexquota.Session
+	if wexquota.Managed(request.User.Email) {
+		manager := wexquota.Environment()
+		if manager == nil {
+			return wexquota.ErrDenied
+		}
+		var quotaErr error
+		ctx, quotaSession, quotaErr = manager.Begin(ctx, request.User.Email, connection)
+		if quotaErr != nil {
+			return quotaErr
+		}
+		defer quotaSession.Close()
+	}
 	account := request.User.Account.(*vless.MemoryAccount)
 
 	if account.Reverse != nil && request.Command != protocol.RequestCommandRvs {
@@ -621,6 +636,9 @@ func (h *Handler) Process(ctx context.Context, network net.Network, connection s
 	}
 	clientWriter := encoding.EncodeBodyAddons(bufferWriter, request, requestAddons, trafficState, false, ctx, connection, nil)
 	bufferWriter.SetFlushNext()
+	if quotaSession != nil {
+		clientWriter = quotaSession.WrapWriter(clientWriter, request.Command == protocol.RequestCommandUDP, connection)
+	}
 
 	if request.Command == protocol.RequestCommandRvs {
 		r, err := h.GetReverse(account)

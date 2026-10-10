@@ -3,7 +3,11 @@ package commander
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/errors"
@@ -74,10 +78,38 @@ func (c *Commander) Start() error {
 	}
 
 	if len(c.listen) > 0 {
-		if l, err := net.Listen("tcp", c.listen); err != nil {
+		network, address := "tcp", c.listen
+		if strings.HasPrefix(address, "unix://") {
+			network, address = "unix", strings.TrimPrefix(address, "unix://")
+			parent, err := os.Stat(filepath.Dir(address))
+			if err != nil || !filepath.IsAbs(address) || parent.Mode().Perm() != 0700 {
+				return errors.New("private API directory required")
+			}
+			if info, err := os.Lstat(address); err == nil {
+				if info.Mode()&os.ModeSocket == 0 {
+					return errors.New("API socket occupied")
+				}
+				if active, err := net.DialTimeout("unix", address, 100*time.Millisecond); err == nil {
+					active.Close()
+					return errors.New("API socket already active")
+				}
+				if err = os.Remove(address); err != nil {
+					return err
+				}
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
+		if l, err := net.Listen(network, address); err != nil {
 			errors.LogErrorInner(context.Background(), err, "API server failed to listen on ", c.listen)
 			return err
 		} else {
+			if network == "unix" {
+				if err := os.Chmod(address, 0600); err != nil {
+					l.Close()
+					return err
+				}
+			}
 			errors.LogInfo(context.Background(), "API server listening on ", l.Addr())
 			go listen(l)
 		}
