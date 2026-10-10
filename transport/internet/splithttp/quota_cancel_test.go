@@ -11,15 +11,17 @@ import (
 )
 
 type stalledResponse struct {
-	entered chan struct{}
-	cancel  chan struct{}
-	once    sync.Once
+	entered  chan struct{}
+	cancel   chan struct{}
+	returned chan struct{}
+	once     sync.Once
 }
 
 func (s *stalledResponse) Header() http.Header { return http.Header{} }
 func (s *stalledResponse) WriteHeader(int)     {}
 func (s *stalledResponse) Write([]byte) (int, error) {
 	close(s.entered)
+	defer close(s.returned)
 	<-s.cancel
 	return 0, errors.New("deadline")
 }
@@ -31,7 +33,7 @@ func (s *stalledResponse) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 func TestQuotaCloseCancelsStalledResponseWithoutMutex(t *testing.T) {
-	w := &stalledResponse{entered: make(chan struct{}), cancel: make(chan struct{})}
+	w := &stalledResponse{entered: make(chan struct{}), cancel: make(chan struct{}), returned: make(chan struct{})}
 	c := &httpServerConn{Instance: done.New(), ResponseWriter: w}
 	finished := make(chan struct{})
 	go func() { c.Write([]byte("pending")); close(finished) }()
@@ -39,9 +41,19 @@ func TestQuotaCloseCancelsStalledResponseWithoutMutex(t *testing.T) {
 	closed := make(chan struct{})
 	go func() { c.Close(); close(closed) }()
 	select {
-	case <-closed:
+	case <-c.Wait():
+		select {
+		case <-w.returned:
+		default:
+			t.Fatal("ServeHTTP signaled before concurrent Write finished")
+		}
 	case <-time.After(time.Second):
 		t.Fatal("revoke deadlocked behind downstream Write")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not return")
 	}
 	select {
 	case <-finished:

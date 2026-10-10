@@ -432,6 +432,8 @@ func (c *httpServerConn) Write(b []byte) (int, error) {
 // must not prevent revoking this stream or stall its control-plane acknowledgement.
 func (c *httpServerConn) Close() error {
 	http.NewResponseController(c.ResponseWriter).SetWriteDeadline(time.Now())
+	c.Lock()
+	defer c.Unlock()
 	return c.Instance.Close()
 }
 func (c *httpServerConn) SetWriteDeadline(t time.Time) error {
