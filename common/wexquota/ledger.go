@@ -461,3 +461,7 @@ func (m *Manager) Close() error {
 	m.lock.Close()
 	return e
 }
+
+// Disarm cancels paid flows without replacing the authoritative policy revision.
+// A subsequent, externally witnessed Apply is required to resume service.
+func (m *Manager) Disarm() { m.mu.Lock(); m.armed = false; m.mu.Unlock(); m.closeAll() }

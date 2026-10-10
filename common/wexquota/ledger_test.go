@@ -317,3 +317,29 @@ func TestAuthenticatedContextSurvivesMuxAndTimeoutOnly(t *testing.T) {
 		t.Fatal("authenticated handle lost through nested mux context")
 	}
 }
+
+func TestDisarmPreservesHighwaterAndRequiresApply(t *testing.T) {
+	m, r := fixture(t, 100)
+	s := flow(t, m, Prefix+"test")
+	s.charge(10, false)
+	before := m.State()
+	m.Disarm()
+	if m.State().Healthy {
+		t.Fatal("disarm still healthy")
+	}
+	if _, e := s.charge(1, false); e == nil {
+		t.Fatal("disarmed forward")
+	}
+	after := m.State()
+	if after.Sequence != before.Sequence || after.Revision != before.Revision || after.Usage[0].UsedBytes != 10 {
+		t.Fatal("disarm changed ledger")
+	}
+	r.MinSequence = before.Sequence
+	if e := m.Apply(r); e != nil {
+		t.Fatal(e)
+	}
+	fresh := flow(t, m, Prefix+"test")
+	if _, e := fresh.charge(1, false); e != nil {
+		t.Fatal(e)
+	}
+}

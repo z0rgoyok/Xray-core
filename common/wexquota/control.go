@@ -62,6 +62,15 @@ func (m *Manager) Serve() error {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(m.State())
 	})
+	mux.HandleFunc("POST /v1/disarm", func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > 0 {
+			http.Error(w, "managed transport unavailable", 400)
+			return
+		}
+		m.Disarm()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(m.State())
+	})
 	mux.HandleFunc("PUT /v1/grants", func(w http.ResponseWriter, r *http.Request) {
 		var req Request
 		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20))
