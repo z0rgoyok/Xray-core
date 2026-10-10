@@ -343,3 +343,16 @@ func TestDisarmPreservesHighwaterAndRequiresApply(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestTCPRemainingAcrossMultipleBuffers(t *testing.T) {
+	m, _ := fixture(t, 3000)
+	s := flow(t, m, Prefix+"test")
+	out := &captureWriter{}
+	input := buf.MultiBuffer{buf.FromBytes(bytes.Repeat([]byte("a"), 2048)), buf.FromBytes(bytes.Repeat([]byte("b"), 2048))}
+	if e := s.WrapWriter(out, false, s.conn).WriteMultiBuffer(input); e != nil {
+		t.Fatal(e)
+	}
+	if out.Len() != 3000 || m.State().Usage[0].UsedBytes != 3000 || out.Bytes()[2048] != 'b' {
+		t.Fatal("TCP remaining lost", out.Len(), m.State())
+	}
+}

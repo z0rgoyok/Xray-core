@@ -151,6 +151,14 @@ func (w *quotaWriter) WriteMultiBuffer(mb buf.MultiBuffer) error {
 		}
 		if n < int64(chunk.Len()) {
 			rest, head := buf.SplitSize(chunk, int32(n))
+			// SplitSize preserves whole later buffers and can stop before the exact
+			// remainder. Preserve the prefix of the next buffer for TCP's final bytes.
+			missing := int32(n) - head.Len()
+			if missing > 0 && len(rest) > 0 {
+				partial := buf.New()
+				partial.Write(rest[0].BytesTo(missing))
+				head = append(head, partial)
+			}
 			buf.ReleaseMulti(rest)
 			chunk = head
 		}
