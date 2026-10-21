@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ const MaxBlock = 65536
 const compactEvery = 4096
 
 var ErrDenied = errors.New("managed transport unavailable")
+var trialPackage = regexp.MustCompile(`^happ-trial-[1-9][0-9]*$`)
 
 type Grant struct {
 	Email      string    `json:"email"`
@@ -37,11 +39,12 @@ type Usage struct {
 	UsedBytes int64  `json:"usedBytes"`
 }
 type Request struct {
-	Revision         uint64  `json:"revision"`
-	ExpectedLedgerID string  `json:"expectedLedgerId"`
-	MinSequence      uint64  `json:"minSequence"`
-	Grants           []Grant `json:"grants"`
-	Floors           []Usage `json:"floors"`
+	TrialQuotaVersion uint64  `json:"trialQuotaVersion,omitempty"`
+	Revision          uint64  `json:"revision"`
+	ExpectedLedgerID  string  `json:"expectedLedgerId"`
+	MinSequence       uint64  `json:"minSequence"`
+	Grants            []Grant `json:"grants"`
+	Floors            []Usage `json:"floors"`
 }
 type State struct {
 	LedgerID    string  `json:"ledgerId"`
@@ -360,7 +363,7 @@ func (m *Manager) Apply(req Request) error {
 		m.closeAll()
 		return ErrDenied
 	}
-	if !m.healthy || m.closed || req.Revision == 0 {
+	if !m.healthy || m.closed || req.Revision == 0 || (req.TrialQuotaVersion != 0 && req.TrialQuotaVersion != 2) {
 		return finish(ErrDenied)
 	}
 	sort.Slice(req.Grants, func(i, j int) bool { return req.Grants[i].Email < req.Grants[j].Email })
@@ -401,7 +404,12 @@ func (m *Manager) Apply(req Request) error {
 		grants[g.Email] = g
 		k := key(g.PackageID, g.PeriodID)
 		if limit, ok := next.Limits[k]; ok && limit != g.LimitBytes {
-			return finish(ErrDenied)
+			// Explicit v2 trial contract migration. Preserve the durable bucket,
+			// consumption, identity and expiry; every other limit change is refused.
+			if !(req.TrialQuotaVersion == 2 && req.Revision > m.data.Revision &&
+				trialPackage.MatchString(g.PackageID) && limit == 1_000_000_000 && g.LimitBytes == 30_000_000_000) {
+				return finish(ErrDenied)
+			}
 		}
 		next.Limits[k] = g.LimitBytes
 		if _, ok := usage[k]; !ok {
