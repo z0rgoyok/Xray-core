@@ -1,6 +1,7 @@
 package splithttp
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -8,8 +9,108 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/signal/done"
+	"github.com/xtls/xray-core/common/wexquota"
 )
+
+type discardCloser struct{}
+
+func (discardCloser) Write(b []byte) (int, error) { return len(b), nil }
+func (discardCloser) Close() error                { return nil }
+
+func TestExhaustedUploadKeepsOtherUsageAndPolicyAvailable(t *testing.T) {
+	dir := t.TempDir()
+	id, err := wexquota.Initialize(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := wexquota.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	now := time.Now().UTC()
+	r := wexquota.Request{Revision: 1, ExpectedLedgerID: id, Grants: []wexquota.Grant{
+		{Email: "wex-paid:trial", PackageID: "happ-trial-1", PeriodID: "period", StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour), LimitBytes: 1},
+		{Email: "wex-paid:other", PackageID: "happ-2", PeriodID: "period", StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour), LimitBytes: 100},
+	}}
+	if err := m.Apply(r); err != nil {
+		t.Fatal(err)
+	}
+	q := NewUploadQueue(1)
+	if err := q.Push(Packet{Seq: 0, Payload: []byte("queued")}); err != nil {
+		t.Fatal(err)
+	}
+	pushed := make(chan error, 1)
+	go func() { pushed <- q.Push(Packet{Seq: 1, Payload: []byte("waiting")}) }()
+	select {
+	case <-pushed:
+		t.Fatal("queue not full")
+	case <-time.After(30 * time.Millisecond):
+	}
+	conn := &splitConn{reader: q, writer: discardCloser{}}
+	_, exhausted, err := m.Begin(context.Background(), "wex-paid:trial", conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := buf.New()
+	b.Write([]byte("x"))
+	if err := exhausted.WrapWriter(buf.NewWriter(io.Discard), false, conn).WriteMultiBuffer(buf.MultiBuffer{b}); err != nil {
+		t.Fatal(err)
+	}
+	applied := make(chan error, 1)
+	go func() { applied <- m.Apply(r) }()
+	select {
+	case err := <-applied:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		q.Read(make([]byte, 32))
+		<-pushed
+		<-applied
+		t.Fatal("one exhausted upload blocked the next policy/statistics cycle")
+	}
+	select {
+	case err := <-pushed:
+		if err == nil {
+			t.Fatal("pending upload survived quota close")
+		}
+	case <-time.After(time.Second):
+		q.Close()
+		t.Fatal("pending upload was not released")
+	}
+	otherConn := &splitConn{reader: io.NopCloser(nilReader{}), writer: discardCloser{}}
+	_, other, err := m.Begin(context.Background(), "wex-paid:other", otherConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = buf.New()
+	b.Write([]byte("other"))
+	if err := other.WrapWriter(buf.NewWriter(io.Discard), false, otherConn).WriteMultiBuffer(buf.MultiBuffer{b}); err != nil {
+		t.Fatal(err)
+	}
+	state := m.State()
+	if !state.Healthy {
+		t.Fatal("one cap disarmed all clients")
+	}
+	usage := map[string]int64{}
+	for _, u := range state.Usage {
+		usage[u.PackageID] = u.UsedBytes
+	}
+	if usage["happ-trial-1"] != 1 || usage["happ-2"] != 5 {
+		t.Fatal("usage lost", usage)
+	}
+	if _, _, err := m.Begin(context.Background(), "wex-paid:trial", conn); err == nil {
+		t.Fatal("exhausted client admitted")
+	}
+	other.Close()
+}
+
+type nilReader struct{}
+
+func (nilReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 type stalledResponse struct {
 	entered  chan struct{}

@@ -6,7 +6,6 @@ package splithttp
 import (
 	"container/heap"
 	"io"
-	"runtime"
 	"sync"
 
 	"github.com/xtls/xray-core/common/errors"
@@ -20,21 +19,25 @@ type Packet struct {
 
 type uploadQueue struct {
 	reader          io.ReadCloser
+	readerMutex     sync.Mutex
+	readMutex       sync.Mutex
+	closeOnce       sync.Once
+	closing         chan struct{}
+	closeErr        error
 	nomore          bool
 	pushedPackets   chan Packet
 	writeCloseMutex sync.Mutex
 	heap            uploadHeap
 	nextSeq         uint64
-	closed          bool
 	maxPackets      int
 }
 
 func NewUploadQueue(maxPackets int) *uploadQueue {
 	return &uploadQueue{
 		pushedPackets: make(chan Packet, maxPackets),
+		closing:       make(chan struct{}),
 		heap:          uploadHeap{},
 		nextSeq:       0,
-		closed:        false,
 		maxPackets:    maxPackets,
 	}
 }
@@ -43,8 +46,10 @@ func (h *uploadQueue) Push(p Packet) error {
 	h.writeCloseMutex.Lock()
 	defer h.writeCloseMutex.Unlock()
 
-	if h.closed {
+	select {
+	case <-h.closing:
 		return errors.New("packet queue closed")
+	default:
 	}
 	if h.nomore {
 		return errors.New("h.reader already exists")
@@ -52,43 +57,65 @@ func (h *uploadQueue) Push(p Packet) error {
 	if p.Reader != nil {
 		h.nomore = true
 	}
-	h.pushedPackets <- p
-	return nil
+	select {
+	case <-h.closing:
+		return errors.New("packet queue closed")
+	case h.pushedPackets <- p:
+		return nil
+	}
 }
 
 func (h *uploadQueue) Close() error {
-	h.writeCloseMutex.Lock()
-	defer h.writeCloseMutex.Unlock()
-
-	if !h.closed {
-		h.closed = true
-		runtime.Gosched() // hope Read() gets the packet
-	f:
-		for {
-			select {
-			case p := <-h.pushedPackets:
-				if p.Reader != nil {
-					h.reader = p.Reader
-				}
-			default:
-				break f
+	h.closeOnce.Do(func() {
+		// Wake a producer blocked on capacity BEFORE waiting for its mutex.
+		close(h.closing)
+		h.writeCloseMutex.Lock()
+		defer h.writeCloseMutex.Unlock()
+		close(h.pushedPackets)
+		for p := range h.pushedPackets {
+			if p.Reader != nil {
+				h.readerMutex.Lock()
+				h.reader = p.Reader
+				h.readerMutex.Unlock()
 			}
 		}
-		close(h.pushedPackets)
+		h.readerMutex.Lock()
+		reader := h.reader
+		h.readerMutex.Unlock()
+		if reader != nil {
+			h.closeErr = reader.Close()
+		}
+	})
+	return h.closeErr
+}
+
+func (h *uploadQueue) readStream(reader io.ReadCloser, b []byte) (int, error) {
+	h.readerMutex.Lock()
+	select {
+	case <-h.closing:
+		h.readerMutex.Unlock()
+		reader.Close()
+		return 0, io.EOF
+	default:
+		h.reader = reader
+		h.readerMutex.Unlock()
+		return reader.Read(b)
 	}
-	if h.reader != nil {
-		return h.reader.Close()
-	}
-	return nil
 }
 
 func (h *uploadQueue) Read(b []byte) (int, error) {
-	if h.reader != nil {
-		return h.reader.Read(b)
-	}
-
-	if h.closed {
+	h.readMutex.Lock()
+	defer h.readMutex.Unlock()
+	select {
+	case <-h.closing:
 		return 0, io.EOF
+	default:
+	}
+	h.readerMutex.Lock()
+	reader := h.reader
+	h.readerMutex.Unlock()
+	if reader != nil {
+		return reader.Read(b)
 	}
 
 	if len(h.heap) == 0 {
@@ -97,8 +124,7 @@ func (h *uploadQueue) Read(b []byte) (int, error) {
 			return 0, io.EOF
 		}
 		if packet.Reader != nil {
-			h.reader = packet.Reader
-			return h.reader.Read(b)
+			return h.readStream(packet.Reader, b)
 		}
 		heap.Push(&h.heap, packet)
 	}

@@ -45,6 +45,87 @@ func flow(t *testing.T, m *Manager, email string) *Session {
 	t.Cleanup(s.Close)
 	return s
 }
+
+func TestTrialContractUpgradePreservesConsumptionAndRestart(t *testing.T) {
+	m, r := fixture(t, 1_000_000_000)
+	r.Revision++
+	r.Grants[0].PackageID = "happ-trial-42"
+	if err := m.Apply(r); err != nil {
+		t.Fatal(err)
+	}
+	s := flow(t, m, r.Grants[0].Email)
+	if n, err := s.charge(23, false); err != nil || n != 23 {
+		t.Fatal(n, err)
+	}
+	before := m.State()
+	r.Revision++
+	r.Grants[0].LimitBytes = 30_000_000_000
+	if err := m.Apply(r); err == nil {
+		t.Fatal("implicit quota increase accepted")
+	}
+	if m.State().Sequence != before.Sequence {
+		t.Fatal("refused request changed ledger")
+	}
+	r.TrialQuotaVersion = 2
+	if err := m.Apply(r); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.charge(11, false); err != nil || n != 11 {
+		t.Fatal("existing flow lost", n, err)
+	}
+	for _, u := range m.State().Usage {
+		if u.PackageID == "happ-trial-42" && u.UsedBytes != 34 {
+			t.Fatal(u)
+		}
+	}
+	if err := m.Apply(r); err != nil {
+		t.Fatal("idempotent retry", err)
+	}
+	dir := m.dir
+	s.Close()
+	m.Close()
+	m, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if err := m.Apply(r); err != nil {
+		t.Fatal("restart", err)
+	}
+	for _, u := range m.State().Usage {
+		if u.PackageID == "happ-trial-42" && u.UsedBytes != 34 {
+			t.Fatal("usage reset", u)
+		}
+	}
+	r.Revision++
+	r.Grants[0].LimitBytes = 1_000_000_000
+	if err := m.Apply(r); err == nil {
+		t.Fatal("downgrade accepted")
+	}
+}
+
+func TestTrialUpgradeCannotChangePaidOrArbitraryQuota(t *testing.T) {
+	for _, packageID := range []string{"happ-42", "happ-trial-0", "happ-trial-42-other"} {
+		t.Run(packageID, func(t *testing.T) {
+			m, r := fixture(t, 1_000_000_000)
+			r.Revision++
+			r.Grants[0].PackageID = packageID
+			if err := m.Apply(r); err != nil {
+				t.Fatal(err)
+			}
+			before := m.State()
+			r.Revision++
+			r.TrialQuotaVersion = 2
+			r.Grants[0].LimitBytes = 30_000_000_000
+			if err := m.Apply(r); err == nil {
+				t.Fatal("foreign package upgraded")
+			}
+			if m.State().Sequence != before.Sequence {
+				t.Fatal("refusal changed ledger")
+			}
+		})
+	}
+}
 func TestDurableLimitRotationAndRestart(t *testing.T) {
 	m, r := fixture(t, 100)
 	s := flow(t, m, Prefix+"test")
